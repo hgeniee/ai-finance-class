@@ -996,13 +996,17 @@ else:
     print(f"  {'✅ 지수기반 종목분석 섹션 신규 삽입' if ok else '❌ 삽입 실패'}")
 
 # ── AI 뉴스 요약 섹션 ──
+# 기존 뉴스 섹션부터 페이지 끝까지 삭제 후 재삽입 (항상 최신 요약 반영)
 if news_section_id:
-    # 기존 뉴스 섹션 이후 블록을 통째로 삭제 후 재삽입하는 대신,
-    # 섹션을 통째로 새로 append (중복 방지는 섹션 ID 탐지로 처리)
-    print("  ℹ️  뉴스 섹션 이미 존재 — callout만 갱신 (재실행 시 섹션 누적 방지)")
-else:
-    ok = append_blocks(PAGE_PORTFOLIO, [b_divider()] + news_summary_blocks)
-    print(f"  {'✅ AI 뉴스 요약 섹션 신규 삽입' if ok else '❌ 삽입 실패'}")
+    news_start = next((i for i, b in enumerate(all_blocks) if b["id"] == news_section_id), None)
+    if news_start is not None:
+        # 뉴스 섹션 헤딩부터 페이지 끝 블록까지 삭제
+        for b in all_blocks[news_start:]:
+            delete_block(b["id"])
+        print(f"  🗑️  기존 뉴스 섹션 삭제 ({len(all_blocks) - news_start}개 블록)")
+
+ok = append_blocks(PAGE_PORTFOLIO, [b_divider()] + news_summary_blocks)
+print(f"  {'✅ AI 뉴스 요약 섹션 삽입' if ok else '❌ 삽입 실패'}")
 
 # ─────────────────────────────────────────────
 # 10. 완료
