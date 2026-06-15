@@ -197,7 +197,24 @@ def b_para(text, color="default"):
         "rich_text":[{"type":"text","text":{"content":text},"annotations":{"color":color}}]}}
 
 # ─────────────────────────────────────────────
-# 2. 현재가 + 환율 조회
+# 2. DB 스키마 초기화 (현재가 컬럼 자동 추가)
+# ─────────────────────────────────────────────
+def ensure_db_property(db_id: str, prop_name: str, prop_type: str = "number"):
+    db_info = notion.databases.retrieve(database_id=db_id)
+    if prop_name not in db_info["properties"]:
+        notion.databases.update(
+            database_id=db_id,
+            properties={prop_name: {prop_type: {"format": "number"}}}
+        )
+        print(f"  ✅ DB 컬럼 추가: {prop_name}")
+    else:
+        print(f"  ✔ DB 컬럼 이미 존재: {prop_name}")
+
+print("\n── DB 스키마 확인 ──")
+ensure_db_property(DB_보유주식, "현재가")
+
+# ─────────────────────────────────────────────
+# 3. 현재가 + 환율 조회
 # ─────────────────────────────────────────────
 print("\n── 현재가 및 환율 조회 ──")
 
