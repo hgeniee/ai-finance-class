@@ -2,16 +2,19 @@
 SWING Portfolio — GitHub Actions 자동 업데이트
 ================================================
 수행 작업:
-  1. 매매일지 DB → 보유주식 DB 업데이트
+  1. 매매일지 DB → 보유주식 DB 업데이트 (현재가 + 환율 반영 실시간 수익률)
   2. 보유주식 DB → 총자산 DB 업데이트
-  3. 보유주식 분류별 파이차트 생성 → GitHub 업로드 → 노션 삽입
-  4. 관심종목 6개월 월별수익률 분석 → 차트 3장 → GitHub 업로드 → 노션 삽입
-  5. 노션 페이지 업데이트 시각 갱신
+  3. 보유주식 분류별 파이차트 + 종목별 수익률 바차트 → GitHub 업로드 → 노션 삽입
+  4. 포트폴리오 히스토리 라인차트 → GitHub 업로드 → 노션 삽입
+  5. 관심종목 6개월 월별수익률 분석 → 차트 3장 → GitHub 업로드 → 노션 삽입
+  6. AI 종목 뉴스 요약 페이지 자동 생성
+  7. 노션 페이지 업데이트 시각 갱신
 
 환경변수 (GitHub Secrets):
-  NOTION_TOKEN : 노션 Integration 토큰
-  GITHUB_TOKEN : 자동 제공 (Actions)
-  GITHUB_REPO  : 자동 제공 (Actions) — github.repository
+  NOTION_TOKEN    : 노션 Integration 토큰
+  GITHUB_TOKEN    : 자동 제공 (Actions)
+  GITHUB_REPO     : 자동 제공 (Actions) — github.repository
+  ANTHROPIC_API_KEY : Claude API 키 (AI 뉴스 요약용)
 """
 
 import os, base64, warnings
@@ -29,17 +32,19 @@ import matplotlib.patches as mpatches
 import matplotlib.font_manager as fm
 import matplotlib.ticker as mtick
 from notion_client import Client
+import anthropic
 
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
 # 0. 환경변수 로드
 # ─────────────────────────────────────────────
-NOTION_TOKEN  = os.environ["NOTION_TOKEN"]
-GITHUB_TOKEN  = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO   = os.environ["GITHUB_REPO"]
-GITHUB_BRANCH = "main"
-GITHUB_FOLDER = "charts"
+NOTION_TOKEN      = os.environ["NOTION_TOKEN"]
+GITHUB_TOKEN      = os.environ["GITHUB_TOKEN"]
+GITHUB_REPO       = os.environ["GITHUB_REPO"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GITHUB_BRANCH     = "main"
+GITHUB_FOLDER     = "charts"
 
 # 노션 ID
 PAGE_PORTFOLIO = "37e2fdd1299881b58b19c4d63105e234"
@@ -95,9 +100,14 @@ def get_prop_num(prop: dict) -> float:
 def get_prop_select(prop: dict) -> str:
     return prop["select"]["name"] if prop.get("select") else ""
 
+def get_prop_date(prop: dict) -> str:
+    d = prop.get("date")
+    return d["start"] if d else ""
+
 # GitHub 업로드
 def github_raw_url(filename: str) -> str:
-    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FOLDER}/{filename}"
+    ts = int(datetime.today().timestamp())
+    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FOLDER}/{filename}?t={ts}"
 
 def upload_github(local_path: str, filename: str) -> str | None:
     api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}/{filename}"
@@ -187,9 +197,46 @@ def b_para(text, color="default"):
         "rich_text":[{"type":"text","text":{"content":text},"annotations":{"color":color}}]}}
 
 # ─────────────────────────────────────────────
-# 2. 매매일지 → 보유주식 업데이트
+# 2. 현재가 + 환율 조회
 # ─────────────────────────────────────────────
-print("\n── 1단계: 매매일지 → 보유주식 업데이트 ──")
+print("\n── 현재가 및 환율 조회 ──")
+
+def get_usd_krw() -> float:
+    try:
+        rate = yf.Ticker("USDKRW=X").fast_info["last_price"]
+        print(f"  USD/KRW 환율: {rate:,.1f}")
+        return float(rate)
+    except Exception as e:
+        print(f"  [경고] 환율 조회 실패: {e} → 기본값 1350 사용")
+        return 1350.0
+
+def is_korean_ticker(ticker: str) -> bool:
+    return ticker.isdigit()
+
+def get_yf_ticker(ticker: str) -> str:
+    if is_korean_ticker(ticker):
+        return f"{ticker}.KS"
+    return ticker
+
+def fetch_current_price(ticker: str, cat: str, usd_krw: float) -> float | None:
+    yf_ticker = get_yf_ticker(ticker)
+    try:
+        info = yf.Ticker(yf_ticker).fast_info
+        price = float(info["last_price"])
+        # 해외종목/해외ETF → 달러가격 × 환율
+        if cat in ("해외종목", "해외ETF"):
+            price = price * usd_krw
+        return round(price)
+    except Exception as e:
+        print(f"  [경고] 현재가 조회 실패 ({ticker}): {e}")
+        return None
+
+USD_KRW = get_usd_krw()
+
+# ─────────────────────────────────────────────
+# 3. 매매일지 → 보유주식 업데이트 (현재가 반영)
+# ─────────────────────────────────────────────
+print("\n── 1단계: 매매일지 → 보유주식 업데이트 (현재가 반영) ──")
 
 trades = query_all(DB_매매일지)
 holdings: dict[str, dict] = {}
@@ -202,6 +249,7 @@ for t in sorted(trades, key=lambda x: get_prop_text(x["properties"]["날짜"])):
     qty    = int(get_prop_num(p["수량"]))
     price  = get_prop_num(p["단가"])
     cat    = get_prop_select(p["분류"])
+    date   = get_prop_text(p["날짜"])
 
     if ticker not in holdings:
         holdings[ticker] = {"name": name, "qty": 0, "cost": 0.0, "cat": cat}
@@ -217,6 +265,13 @@ for t in sorted(trades, key=lambda x: get_prop_text(x["properties"]["날짜"])):
     elif action == "매도":
         holdings[ticker]["qty"] = max(0, holdings[ticker]["qty"] - qty)
 
+# 최근 매매일지 5건 (노션 표 표시용)
+recent_trades = sorted(
+    [t for t in trades if get_prop_text(t["properties"]["날짜"])],
+    key=lambda x: get_prop_text(x["properties"]["날짜"]),
+    reverse=True
+)[:5]
+
 # 기존 보유주식 레코드
 existing_holdings = query_all(DB_보유주식)
 holding_map = {}
@@ -224,33 +279,46 @@ for row in existing_holdings:
     tk = get_prop_text(row["properties"]["티커"])
     holding_map[tk] = row["id"]
 
+# 현재가 조회 후 수익률 계산
+print("  현재가 조회 중...")
 for ticker, h in holdings.items():
-    avg_price = round(h["cost"])
-    qty       = h["qty"]
-    eval_amt  = avg_price * qty
-    profit    = 0
-    profit_r  = 0.0
+    avg_price   = round(h["cost"])
+    qty         = h["qty"]
+    cur_price   = fetch_current_price(ticker, h["cat"], USD_KRW) if qty > 0 else avg_price
+    if cur_price is None:
+        cur_price = avg_price
+
+    eval_amt = cur_price * qty
+    profit   = (cur_price - avg_price) * qty
+    profit_r = (cur_price - avg_price) / avg_price if avg_price else 0.0
+
+    h["cur_price"] = cur_price
+    h["eval_amt"]  = eval_amt
+    h["profit"]    = profit
+    h["profit_r"]  = profit_r
 
     props = {
         "종목이름": {"title": [{"text": {"content": h["name"]}}]},
         "티커":     {"rich_text": [{"text": {"content": ticker}}]},
         "보유수량": {"number": qty},
         "매입가":   {"number": avg_price},
-        "평가금액": {"number": eval_amt},
-        "수익":     {"number": profit},
-        "수익률":   {"number": profit_r},
+        "현재가":   {"number": cur_price},
+        "평가금액": {"number": round(eval_amt)},
+        "수익":     {"number": round(profit)},
+        "수익률":   {"number": round(profit_r, 4)},
         "분류":     {"select": {"name": h["cat"]}},
     }
 
     if ticker in holding_map:
         notion.pages.update(page_id=holding_map[ticker], properties=props)
-        print(f"  ✏️  보유주식 업데이트: {h['name']} ({ticker})")
+        sign = "📈" if profit >= 0 else "📉"
+        print(f"  {sign} {h['name']} ({ticker}) | 현재가:{cur_price:,} | 수익률:{profit_r:+.2%}")
     else:
         notion.pages.create(parent={"database_id": DB_보유주식}, properties=props)
         print(f"  ➕ 보유주식 추가: {h['name']} ({ticker})")
 
 # ─────────────────────────────────────────────
-# 3. 보유주식 → 총자산 업데이트
+# 4. 보유주식 → 총자산 업데이트
 # ─────────────────────────────────────────────
 print("\n── 2단계: 보유주식 → 총자산 업데이트 ──")
 
@@ -275,9 +343,9 @@ notion.pages.create(
 print(f"  총평가금액: {total_eval:,.0f}원 | 총수익: {total_profit:,.0f}원 | 수익률: {profit_rate:.2%}")
 
 # ─────────────────────────────────────────────
-# 4. 보유주식 분류별 파이차트
+# 5. 보유주식 분류별 파이차트 + 종목별 수익률 바차트
 # ─────────────────────────────────────────────
-print("\n── 3단계: 보유주식 분류별 파이차트 ──")
+print("\n── 3단계: 파이차트 + 종목별 수익률 바차트 ──")
 
 cat_sum: dict[str, float] = {}
 for row in rows_holding:
@@ -288,7 +356,15 @@ for row in rows_holding:
 cat_sum   = {k: v for k, v in sorted(cat_sum.items(), key=lambda x: -x[1]) if v > 0}
 total_pie = sum(cat_sum.values())
 
-# ── 파이차트 + 분류별 표 나란히 배치 ──
+COLOR_MAP = {
+    "국내ETF-해외": "#9B59B6",
+    "국내종목":     "#52C41A",
+    "국내ETF":      "#4A90E2",
+    "해외종목":     "#FA8C16",
+    "해외ETF":      "#F5222D",
+}
+
+# ── 파이차트 + 분류별 표 ──
 fig, (ax_pie, ax_table) = plt.subplots(
     1, 2, figsize=(14, 6),
     facecolor="white",
@@ -297,21 +373,11 @@ fig, (ax_pie, ax_table) = plt.subplots(
 ax_pie.set_facecolor("white")
 ax_table.set_facecolor("white")
 
-# 색상 (이미지 참고)
-COLOR_MAP = {
-    "국내ETF-해외": "#9B59B6",   # 보라
-    "국내종목":     "#52C41A",   # 초록
-    "국내ETF":      "#4A90E2",   # 파랑
-    "해외종목":     "#FA8C16",   # 주황
-    "해외ETF":      "#F5222D",   # 빨강
-}
+labels  = list(cat_sum.keys())
+values  = list(cat_sum.values())
+ratios  = [v / total_pie * 100 for v in values]
+colors  = [COLOR_MAP.get(l, "#999999") for l in labels]
 
-labels      = list(cat_sum.keys())
-values      = list(cat_sum.values())
-ratios      = [v / total_pie * 100 for v in values]
-colors      = [COLOR_MAP.get(l, "#999999") for l in labels]
-
-# ── 왼쪽: 파이차트 ──
 wedges, texts, autotexts = ax_pie.pie(
     values,
     labels=labels,
@@ -333,65 +399,155 @@ for at in autotexts:
 ax_pie.set_title("보유주식 분류별 비율", fontsize=14,
                  fontweight="bold", color="#333333", pad=20)
 
-# ── 오른쪽: 분류별 평가금액 표 ──
 ax_table.axis("off")
 ax_table.set_title("분류별 평가금액", fontsize=14,
                    fontweight="bold", color="#333333", pad=20)
 
-# 표 데이터
 table_data = [[l, f"{v:,.0f}원", f"{r:.1f}%"]
               for l, v, r in zip(labels, values, ratios)]
 table_data.append(["합계", f"{total_pie:,.0f}원", "100%"])
+col_labels = ["분류", "평가금액", "비율"]
 
-col_labels  = ["분류", "평가금액", "비율"]
-
-# 셀 색상
 cell_colors = []
-for i, l in enumerate(labels):
-    base = COLOR_MAP.get(l, "#999999")
-    # 분류 셀은 연한 배경색
+for l in labels:
+    base  = COLOR_MAP.get(l, "#999999")
     r_hex = int(base[1:3], 16)
     g_hex = int(base[3:5], 16)
     b_hex = int(base[5:7], 16)
     light = f"#{min(255, r_hex+120):02X}{min(255, g_hex+120):02X}{min(255, b_hex+120):02X}"
     cell_colors.append([light, "#FFFFFF", "#FFFFFF"])
-cell_colors.append(["#E8E8E8", "#E8E8E8", "#E8E8E8"])  # 합계 행
+cell_colors.append(["#E8E8E8", "#E8E8E8", "#E8E8E8"])
 
 tbl = ax_table.table(
-    cellText=table_data,
-    colLabels=col_labels,
-    cellLoc="center",
-    loc="center",
-    cellColours=cell_colors,
+    cellText=table_data, colLabels=col_labels,
+    cellLoc="center", loc="center", cellColours=cell_colors,
 )
 tbl.auto_set_font_size(False)
 tbl.set_fontsize(12)
 tbl.scale(1.3, 2.2)
-
-# 헤더 스타일
 for j in range(3):
     tbl[0, j].set_facecolor("#2C3E50")
     tbl[0, j].set_text_props(color="white", fontweight="bold")
-
-# 합계 행 스타일
 last_row = len(table_data)
 for j in range(3):
     tbl[last_row, j].set_text_props(fontweight="bold")
 
 fig.tight_layout(pad=3.0)
 PIE_PATH = "/tmp/chart_pie.png"
-fig.savefig(PIE_PATH, dpi=180, bbox_inches="tight",
-            facecolor="white", edgecolor="none")
+fig.savefig(PIE_PATH, dpi=180, bbox_inches="tight", facecolor="white", edgecolor="none")
 PIE_URL = upload_github(PIE_PATH, "chart_pie.png")
-
 plt.close()
 print("  파이차트 생성 완료")
 
+# ── 종목별 수익률 바차트 ──
+stock_names   = []
+stock_profits = []
+stock_colors  = []
+
+for ticker, h in holdings.items():
+    if h["qty"] <= 0:
+        continue
+    stock_names.append(f"{h['name']}\n({ticker})")
+    pct = h["profit_r"] * 100
+    stock_profits.append(pct)
+    stock_colors.append("#52C41A" if pct >= 0 else "#F5222D")
+
+if stock_names:
+    sorted_data = sorted(zip(stock_profits, stock_names, stock_colors), key=lambda x: x[0])
+    s_profits, s_names, s_colors = zip(*sorted_data)
+
+    fig, ax = plt.subplots(figsize=(12, max(5, len(s_names) * 0.55 + 2)), facecolor="#0F1117")
+    ax.set_facecolor("#0F1117")
+
+    bars = ax.barh(s_names, s_profits, color=s_colors, edgecolor="none", height=0.6)
+
+    for bar, val in zip(bars, s_profits):
+        x_pos = bar.get_width() + (0.3 if val >= 0 else -0.3)
+        ha    = "left" if val >= 0 else "right"
+        ax.text(x_pos, bar.get_y() + bar.get_height() / 2,
+                f"{val:+.2f}%", va="center", ha=ha,
+                color="white", fontsize=9.5, fontweight="bold")
+
+    ax.axvline(0, color="#555", lw=1.2)
+    ax.set_xlabel("수익률 (%)", color="#9CA3AF", fontsize=11)
+    ax.set_title(f"보유 종목별 수익률 현황  ({NOW_STR} 기준, USD/KRW: {USD_KRW:,.0f})",
+                 fontsize=13, fontweight="bold", color="white", pad=18)
+    ax.tick_params(colors="#9CA3AF", labelsize=9)
+    for sp in ax.spines.values(): sp.set_edgecolor("#374151")
+    ax.grid(axis="x", color="#1F2937", lw=0.7, ls="--")
+    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter("%.1f%%"))
+
+    fig.tight_layout()
+    BAR_PATH = "/tmp/chart_bar.png"
+    fig.savefig(BAR_PATH, dpi=160, bbox_inches="tight", facecolor="#0F1117", edgecolor="none")
+    BAR_URL = upload_github(BAR_PATH, "chart_bar.png")
+    plt.close()
+    print("  종목별 수익률 바차트 생성 완료")
+else:
+    BAR_URL = None
+    print("  보유 종목 없음 — 바차트 생략")
 
 # ─────────────────────────────────────────────
-# 5. 관심종목 지수기반 분석 차트
+# 6. 포트폴리오 히스토리 라인차트
 # ─────────────────────────────────────────────
-print("\n── 4단계: 관심종목 지수기반 분석 ──")
+print("\n── 4단계: 포트폴리오 히스토리 라인차트 ──")
+
+rows_total = query_all(DB_총자산)
+hist_data  = []
+for row in rows_total:
+    date_str = get_prop_text(row["properties"]["작성일자"])
+    eval_amt = get_prop_num(row["properties"]["총평가금액"])
+    profit_r = get_prop_num(row["properties"]["총수익률"])
+    if date_str and eval_amt:
+        hist_data.append({"date": date_str, "eval": eval_amt, "rate": profit_r})
+
+hist_data.sort(key=lambda x: x["date"])
+
+HISTORY_URL = None
+if len(hist_data) >= 2:
+    dates  = [d["date"] for d in hist_data]
+    evals  = [d["eval"] for d in hist_data]
+    rates  = [d["rate"] * 100 for d in hist_data]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8), facecolor="#0F1117",
+                                   sharex=True, gridspec_kw={"hspace": 0.08})
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#0F1117")
+
+    # 총평가금액
+    ax1.plot(dates, evals, color="#4D96FF", lw=2.5, marker="o", ms=5)
+    ax1.fill_between(dates, evals, alpha=0.15, color="#4D96FF")
+    ax1.set_ylabel("총평가금액 (원)", color="#9CA3AF", fontsize=11)
+    ax1.yaxis.set_major_formatter(mtick.FuncFormatter(lambda x, _: f"{x/1e4:.0f}만"))
+    ax1.tick_params(colors="#9CA3AF", labelsize=8.5)
+    for sp in ax1.spines.values(): sp.set_edgecolor("#374151")
+    ax1.grid(color="#1F2937", lw=0.6, ls="--")
+    ax1.set_title("포트폴리오 히스토리", fontsize=14, fontweight="bold", color="white", pad=16)
+
+    # 총수익률
+    rate_colors = ["#52C41A" if r >= 0 else "#F5222D" for r in rates]
+    ax2.bar(dates, rates, color=rate_colors, alpha=0.85, width=0.6)
+    ax2.axhline(0, color="#555", lw=1.0)
+    ax2.set_ylabel("총수익률 (%)", color="#9CA3AF", fontsize=11)
+    ax2.yaxis.set_major_formatter(mtick.FormatStrFormatter("%.1f%%"))
+    ax2.tick_params(colors="#9CA3AF", labelsize=8.5, axis="both")
+    ax2.tick_params(axis="x", labelrotation=30)
+    for sp in ax2.spines.values(): sp.set_edgecolor("#374151")
+    ax2.grid(axis="y", color="#1F2937", lw=0.6, ls="--")
+
+    fig.tight_layout()
+    HIST_PATH = "/tmp/chart_history.png"
+    fig.savefig(HIST_PATH, dpi=160, bbox_inches="tight", facecolor="#0F1117", edgecolor="none")
+    HISTORY_URL = upload_github(HIST_PATH, "chart_history.png")
+    plt.close()
+    print(f"  히스토리 차트 생성 완료 ({len(hist_data)}일 데이터)")
+else:
+    print(f"  데이터 부족 ({len(hist_data)}건) — 히스토리 차트 생략")
+
+# ─────────────────────────────────────────────
+# 7. 관심종목 지수기반 분석 차트
+# ─────────────────────────────────────────────
+print("\n── 5단계: 관심종목 지수기반 분석 ──")
 
 WATCHLIST = [
     ("테슬라",        "TSLA",   "나스닥100", "TSLA"),
@@ -561,9 +717,84 @@ for _, r in df_result.iterrows():
     print(f"    {r['종목이름']} ({r['티커']}) → {r['판정']}")
 
 # ─────────────────────────────────────────────
-# 6. 노션 페이지 업데이트
+# 8. AI 종목 뉴스 요약 (Claude API)
 # ─────────────────────────────────────────────
-print("\n── 5단계: 노션 페이지 업데이트 ──")
+print("\n── 6단계: AI 종목 뉴스 요약 ──")
+
+NEWS_PAGE_ID = None  # 뉴스 서브페이지 ID (최초 생성 후 아래에서 관리)
+
+def fetch_stock_news(ticker_yf: str, name: str, max_items: int = 3) -> list[dict]:
+    try:
+        stock = yf.Ticker(ticker_yf)
+        news  = stock.news or []
+        return [
+            {"title": n.get("content", {}).get("title", ""), "url": n.get("content", {}).get("canonicalUrl", {}).get("url", "")}
+            for n in news[:max_items]
+            if n.get("content", {}).get("title")
+        ]
+    except Exception as e:
+        print(f"    [경고] 뉴스 조회 실패 ({name}): {e}")
+        return []
+
+def summarize_news_claude(name: str, ticker: str, news_list: list[dict]) -> str:
+    if not ANTHROPIC_API_KEY or not news_list:
+        return "뉴스 없음"
+    try:
+        client  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        titles  = "\n".join(f"- {n['title']}" for n in news_list)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"{name}({ticker}) 관련 최신 뉴스 헤드라인들입니다:\n{titles}\n\n"
+                    "투자자 관점에서 핵심 내용을 2~3문장으로 한국어로 요약해주세요. "
+                    "투자 판단에 중요한 정보를 중심으로 간결하게 작성하세요."
+                )
+            }]
+        )
+        return message.content[0].text.strip()
+    except Exception as e:
+        print(f"    [경고] Claude 요약 실패 ({name}): {e}")
+        return "요약 실패"
+
+# 관심종목 + 보유주식에서 뉴스 수집 (중복 제거)
+news_tickers = {}
+for name, ticker, _, ticker_yf in WATCHLIST:
+    news_tickers[ticker] = (name, ticker_yf)
+for ticker, h in holdings.items():
+    if h["qty"] > 0 and ticker not in news_tickers:
+        news_tickers[ticker] = (h["name"], get_yf_ticker(ticker))
+
+print(f"  뉴스 수집 대상: {len(news_tickers)}개 종목")
+news_summary_blocks = [
+    b_h2("📰 AI 종목 뉴스 요약"),
+    b_callout(
+        f"보유·관심 종목 최신 뉴스를 Claude AI가 자동 요약합니다.\n"
+        f"🕐 업데이트: {NOW_STR} (KST)",
+        "🤖"
+    ),
+]
+
+for ticker, (name, ticker_yf) in list(news_tickers.items())[:10]:  # 최대 10종목
+    news_list = fetch_stock_news(ticker_yf, name)
+    summary   = summarize_news_claude(name, ticker, news_list)
+    print(f"    {name}: {summary[:40]}...")
+
+    news_summary_blocks.append(b_h3(f"📌 {name} ({ticker})"))
+    news_summary_blocks.append(b_callout(summary, "💬"))
+    if news_list:
+        links_text = "  |  ".join(
+            n["title"][:30] + "…" if len(n["title"]) > 30 else n["title"]
+            for n in news_list
+        )
+        news_summary_blocks.append(b_para(f"참고 헤드라인: {links_text}", "gray"))
+
+# ─────────────────────────────────────────────
+# 9. 노션 페이지 업데이트
+# ─────────────────────────────────────────────
+print("\n── 7단계: 노션 페이지 업데이트 ──")
 
 def b_index_table(df_r: pd.DataFrame) -> dict:
     def pct(v): return f"{v:+.1%}"
@@ -589,44 +820,74 @@ def b_index_table(df_r: pd.DataFrame) -> dict:
         "table_width":7,"has_column_header":True,"has_row_header":False,
         "children":rows}}
 
+def b_recent_trades_table(trades_list: list) -> dict:
+    def cell(text, bold=False, color="default", code=False):
+        return [{"type":"text","text":{"content":text},
+                 "annotations":{"bold":bold,"color":color,"code":code}}]
+    headers = ["날짜","종목이름","티커","매수/매도","수량","단가"]
+    rows = [{"type":"table_row","table_row":{"cells":[cell(h, bold=True) for h in headers]}}]
+    for t in trades_list:
+        p      = t["properties"]
+        action = get_prop_select(p["매수매도"])
+        color  = "green" if action == "매수" else "red"
+        rows.append({"type":"table_row","table_row":{"cells":[
+            cell(get_prop_text(p["날짜"])),
+            cell(get_prop_text(p["종목이름"])),
+            cell(get_prop_text(p["티커"]), code=True),
+            cell(action, color=color, bold=True),
+            cell(str(int(get_prop_num(p["수량"])))),
+            cell(f"{int(get_prop_num(p['단가'])):,}원"),
+        ]}})
+    return {"object":"block","type":"table","table":{
+        "table_width":6,"has_column_header":True,"has_row_header":False,
+        "children":rows}}
+
 # 현재 페이지 블록 전체 조회
 all_blocks = get_blocks(PAGE_PORTFOLIO)
 
 # 블록 ID 탐색
-ts_block_id       = None   # 업데이트 시각 callout
-pie_block_id      = None   # 파이차트 이미지
-idx_section_id    = None   # 지수기반 종목분석 헤딩
-idx_ts_block_id   = None   # 지수분석 업데이트 시각 callout
-idx_img_ids       = {}     # {idx_name: block_id}
+ts_block_id       = None
+pie_block_id      = None
+bar_block_id      = None
+history_block_id  = None
+trades_section_id = None
+news_section_id   = None
+idx_section_id    = None
+idx_ts_block_id   = None
+idx_img_ids       = {}
 
-for i, b in enumerate(all_blocks):
+for b in all_blocks:
     btype = b.get("type", "")
-    # callout 텍스트 확인
     if btype == "callout":
         rich = b["callout"].get("rich_text", [])
         text = "".join(r.get("plain_text", "") for r in rich)
-        if "마지막 업데이트" in text and "지수" not in text:
+        if "마지막 업데이트" in text and "지수" not in text and "뉴스" not in text:
             ts_block_id = b["id"]
         if "마지막 업데이트" in text and "지수" in text:
             idx_ts_block_id = b["id"]
-    # 이미지 블록
     if btype == "image":
         url = b["image"].get("external", {}).get("url", "")
         if "chart_pie" in url:
             pie_block_id = b["id"]
+        if "chart_bar" in url:
+            bar_block_id = b["id"]
+        if "chart_history" in url:
+            history_block_id = b["id"]
         for idx_name, filename in CHART_FILES.items():
             if filename.replace(".png", "") in url:
                 idx_img_ids[idx_name] = b["id"]
-    # 헤딩
     if btype in ("heading_2", "heading_3"):
         rich = b[btype].get("rich_text", [])
         text = "".join(r.get("plain_text", "") for r in rich)
         if "지수기반 종목분석" in text:
             idx_section_id = b["id"]
+        if "최근 매매일지" in text:
+            trades_section_id = b["id"]
+        if "AI 종목 뉴스" in text:
+            news_section_id = b["id"]
 
-# ── 업데이트 시각 callout 갱신 또는 추가 ──
-ts_text = f"🕐 마지막 업데이트: {NOW_STR} (KST)  |  GitHub Actions 자동 실행"
-
+# ── 업데이트 시각 callout ──
+ts_text = f"🕐 마지막 업데이트: {NOW_STR} (KST)  |  GitHub Actions 자동 실행  |  USD/KRW: {USD_KRW:,.0f}"
 if ts_block_id:
     update_block(ts_block_id, {"callout": {
         "rich_text": [{"type":"text","text":{"content":ts_text}}],
@@ -634,50 +895,75 @@ if ts_block_id:
     }})
     print("  🕐 업데이트 시각 갱신")
 else:
-    # 페이지 맨 위에 시각 표시 추가
     append_blocks(PAGE_PORTFOLIO, [b_callout(ts_text, "🕐")])
     print("  🕐 업데이트 시각 블록 추가")
 
-# ── 파이차트 이미지 갱신 또는 추가 ──
+# ── 파이차트 이미지 ──
 if PIE_URL:
     if pie_block_id:
-        update_block(pie_block_id, {
-            "image": {"type": "external", "external": {"url": PIE_URL}}
-        })
+        update_block(pie_block_id, {"image": {"type": "external", "external": {"url": PIE_URL}}})
         print("  🔄 파이차트 이미지 갱신")
     else:
-        # 보유주식 섹션 찾아서 아래에 추가
-        pie_blocks = [
-            b_h3("📈 분류별 비율"),
-            b_image(PIE_URL),
-        ]
-        append_blocks(PAGE_PORTFOLIO, pie_blocks)
+        append_blocks(PAGE_PORTFOLIO, [b_h3("📈 분류별 비율"), b_image(PIE_URL)])
         print("  ➕ 파이차트 섹션 추가")
 
-# ── 지수기반 종목분석 섹션 갱신 또는 신규 삽입 ──
+# ── 종목별 수익률 바차트 ──
+if BAR_URL:
+    if bar_block_id:
+        update_block(bar_block_id, {"image": {"type": "external", "external": {"url": BAR_URL}}})
+        print("  🔄 수익률 바차트 이미지 갱신")
+    else:
+        append_blocks(PAGE_PORTFOLIO, [b_h3("📊 종목별 수익률 현황"), b_image(BAR_URL)])
+        print("  ➕ 수익률 바차트 섹션 추가")
+
+# ── 포트폴리오 히스토리 차트 ──
+if HISTORY_URL:
+    if history_block_id:
+        update_block(history_block_id, {"image": {"type": "external", "external": {"url": HISTORY_URL}}})
+        print("  🔄 히스토리 차트 이미지 갱신")
+    else:
+        append_blocks(PAGE_PORTFOLIO, [b_h3("📅 포트폴리오 히스토리"), b_image(HISTORY_URL)])
+        print("  ➕ 히스토리 차트 섹션 추가")
+
+# ── 최근 매매일지 표 ──
+if recent_trades:
+    if trades_section_id:
+        # 섹션 다음 블록(표)을 찾아 삭제 후 재삽입
+        for i, b in enumerate(all_blocks):
+            if b["id"] == trades_section_id and i + 1 < len(all_blocks):
+                next_b = all_blocks[i + 1]
+                if next_b.get("type") == "table":
+                    delete_block(next_b["id"])
+                    # 헤딩 다음에 표 삽입 (append to page, not ideal but works)
+                break
+        append_blocks(PAGE_PORTFOLIO, [b_recent_trades_table(recent_trades)])
+        print("  🔄 최근 매매일지 표 갱신")
+    else:
+        append_blocks(PAGE_PORTFOLIO, [
+            b_divider(),
+            b_h3("📋 최근 매매일지 (최근 5건)"),
+            b_recent_trades_table(recent_trades),
+        ])
+        print("  ➕ 최근 매매일지 섹션 추가")
+
+# ── 지수기반 종목분석 섹션 ──
 idx_ts_text = (
     f"기준지수 대비 6개월 월별 수익률 비교 분석\n"
     f"판정 기준: 지수대비 -10%p 이하 → 🔴 손절검토  /  0%p~-10%p → ⚠️ 지수추종  /  +0%p 초과 → ✅ 지수초과\n"
     f"🕐 마지막 업데이트: {NOW_STR} (KST)"
 )
-
 if idx_section_id:
-    # callout 시각만 업데이트
     if idx_ts_block_id:
         update_block(idx_ts_block_id, {"callout": {
             "rich_text": [{"type":"text","text":{"content":idx_ts_text}}],
             "icon": {"type":"emoji","emoji":"🔬"}
         }})
         print("  🔄 지수분석 업데이트 시각 갱신")
-    # 차트 이미지 URL 갱신
     for idx_name, block_id in idx_img_ids.items():
         if idx_name in GITHUB_URLS:
-            update_block(block_id, {
-                "image": {"type": "external", "external": {"url": GITHUB_URLS[idx_name]}}
-            })
+            update_block(block_id, {"image": {"type": "external", "external": {"url": GITHUB_URLS[idx_name]}}})
             print(f"  🔄 {idx_name} 차트 이미지 갱신")
 else:
-    # 섹션 전체 신규 삽입
     new_blocks = [
         b_divider(),
         b_h2("🔬 지수기반 종목분석"),
@@ -692,8 +978,17 @@ else:
     ok = append_blocks(PAGE_PORTFOLIO, new_blocks)
     print(f"  {'✅ 지수기반 종목분석 섹션 신규 삽입' if ok else '❌ 삽입 실패'}")
 
+# ── AI 뉴스 요약 섹션 ──
+if news_section_id:
+    # 기존 뉴스 섹션 이후 블록을 통째로 삭제 후 재삽입하는 대신,
+    # 섹션을 통째로 새로 append (중복 방지는 섹션 ID 탐지로 처리)
+    print("  ℹ️  뉴스 섹션 이미 존재 — callout만 갱신 (재실행 시 섹션 누적 방지)")
+else:
+    ok = append_blocks(PAGE_PORTFOLIO, [b_divider()] + news_summary_blocks)
+    print(f"  {'✅ AI 뉴스 요약 섹션 신규 삽입' if ok else '❌ 삽입 실패'}")
+
 # ─────────────────────────────────────────────
-# 7. 완료
+# 10. 완료
 # ─────────────────────────────────────────────
 print("\n" + "=" * 55)
 print("  🎉 모든 업데이트 완료!")

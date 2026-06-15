@@ -33,13 +33,14 @@ jobs:
       - name: 📦 패키지 설치
         run: |
           pip install --upgrade pip
-          pip install notion-client==1.0.0 requests matplotlib pandas python-dateutil yfinance
+          pip install notion-client==1.0.0 requests matplotlib pandas python-dateutil yfinance anthropic
 
       - name: 📊 포트폴리오 업데이트 실행
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPO:  ${{ github.repository }}
+          NOTION_TOKEN:      ${{ secrets.NOTION_TOKEN }}
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO:       ${{ github.repository }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python index_analysis.py
 
       - name: ✅ 완료 알림
