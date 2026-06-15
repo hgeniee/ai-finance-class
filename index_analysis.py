@@ -279,65 +279,114 @@ print(f"  총평가금액: {total_eval:,.0f}원 | 총수익: {total_profit:,.0f}
 # ─────────────────────────────────────────────
 print("\n── 3단계: 보유주식 분류별 파이차트 ──")
 
-COLOR_MAP = {
-    "국내종목":     ("#4A90E2", "#2E6CC7"),
-    "국내ETF":      ("#52C41A", "#389E0D"),
-    "국내ETF-해외": ("#722ED1", "#531DAB"),
-    "해외종목":     ("#FA8C16", "#D46B08"),
-    "해외ETF":      ("#F5222D", "#CF1322"),
-}
-
 cat_sum: dict[str, float] = {}
 for row in rows_holding:
     cat    = get_prop_select(row["properties"]["분류"])
     amount = get_prop_num(row["properties"]["평가금액"])
     cat_sum[cat] = cat_sum.get(cat, 0) + amount
 
-cat_sum = {k: v for k, v in sorted(cat_sum.items(), key=lambda x: -x[1]) if v > 0}
+cat_sum   = {k: v for k, v in sorted(cat_sum.items(), key=lambda x: -x[1]) if v > 0}
 total_pie = sum(cat_sum.values())
+
+# ── 파이차트 + 분류별 표 나란히 배치 ──
+fig, (ax_pie, ax_table) = plt.subplots(
+    1, 2, figsize=(14, 6),
+    facecolor="white",
+    gridspec_kw={"width_ratios": [1, 1]}
+)
+ax_pie.set_facecolor("white")
+ax_table.set_facecolor("white")
+
+# 색상 (이미지 참고)
+COLOR_MAP = {
+    "국내ETF-해외": "#9B59B6",   # 보라
+    "국내종목":     "#52C41A",   # 초록
+    "국내ETF":      "#4A90E2",   # 파랑
+    "해외종목":     "#FA8C16",   # 주황
+    "해외ETF":      "#F5222D",   # 빨강
+}
 
 labels      = list(cat_sum.keys())
 values      = list(cat_sum.values())
 ratios      = [v / total_pie * 100 for v in values]
-colors      = [COLOR_MAP.get(l, ("#999", "#666"))[0] for l in labels]
-edge_colors = [COLOR_MAP.get(l, ("#999", "#666"))[1] for l in labels]
+colors      = [COLOR_MAP.get(l, "#999999") for l in labels]
 
-fig, ax = plt.subplots(figsize=(9, 6.5), facecolor="#0F1117")
-ax.set_facecolor("#0F1117")
-
-wedges, _, autotexts = ax.pie(
-    values, labels=None,
+# ── 왼쪽: 파이차트 ──
+wedges, texts, autotexts = ax_pie.pie(
+    values,
+    labels=labels,
     autopct=lambda p: f"{p:.1f}%",
-    startangle=90, colors=colors,
-    wedgeprops=dict(width=0.58, edgecolor="#0F1117", linewidth=2.5),
-    pctdistance=0.75,
+    startangle=90,
+    colors=colors,
+    wedgeprops=dict(edgecolor="white", linewidth=2),
+    pctdistance=0.65,
+    labeldistance=1.15,
 )
+for text in texts:
+    text.set_fontsize(12)
+    text.set_color("#333333")
 for at in autotexts:
-    at.set_fontsize(13); at.set_fontweight("bold"); at.set_color("white")
+    at.set_fontsize(12)
+    at.set_fontweight("bold")
+    at.set_color("white")
 
-ax.text(0,  0.08, "총 평가금액", ha="center", va="center", fontsize=11, color="#9CA3AF")
-ax.text(0, -0.12, f"{total_pie:,.0f}원", ha="center", va="center",
-        fontsize=14, fontweight="bold", color="white")
-ax.set_title("보유주식 분류별 비율", fontsize=17, fontweight="bold", color="white", pad=22)
+ax_pie.set_title("보유주식 분류별 비율", fontsize=14,
+                 fontweight="bold", color="#333333", pad=20)
 
-legend_items = [
-    mpatches.Patch(facecolor=colors[i], edgecolor=edge_colors[i], linewidth=1.5,
-                   label=f"{labels[i]}  |  {values[i]:,.0f}원  ({ratios[i]:.1f}%)")
-    for i in range(len(labels))
-]
-ax.legend(handles=legend_items, loc="lower center", bbox_to_anchor=(0.5, -0.13),
-          ncol=1, fontsize=11, frameon=True, facecolor="#1C1F26", edgecolor="#374151",
-          labelcolor="white", handlelength=1.5, handleheight=1.2,
-          borderpad=0.8, labelspacing=0.6)
-ax.add_patch(plt.Circle((0, 0), 0.21, color="#1C1F26", zorder=10))
+# ── 오른쪽: 분류별 평가금액 표 ──
+ax_table.axis("off")
+ax_table.set_title("분류별 평가금액", fontsize=14,
+                   fontweight="bold", color="#333333", pad=20)
 
-fig.tight_layout(rect=[0, 0.05, 1, 1])
+# 표 데이터
+table_data = [[l, f"{v:,.0f}원", f"{r:.1f}%"]
+              for l, v, r in zip(labels, values, ratios)]
+table_data.append(["합계", f"{total_pie:,.0f}원", "100%"])
+
+col_labels  = ["분류", "평가금액", "비율"]
+
+# 셀 색상
+cell_colors = []
+for i, l in enumerate(labels):
+    base = COLOR_MAP.get(l, "#999999")
+    # 분류 셀은 연한 배경색
+    r_hex = int(base[1:3], 16)
+    g_hex = int(base[3:5], 16)
+    b_hex = int(base[5:7], 16)
+    light = f"#{min(255, r_hex+120):02X}{min(255, g_hex+120):02X}{min(255, b_hex+120):02X}"
+    cell_colors.append([light, "#FFFFFF", "#FFFFFF"])
+cell_colors.append(["#E8E8E8", "#E8E8E8", "#E8E8E8"])  # 합계 행
+
+tbl = ax_table.table(
+    cellText=table_data,
+    colLabels=col_labels,
+    cellLoc="center",
+    loc="center",
+    cellColours=cell_colors,
+)
+tbl.auto_set_font_size(False)
+tbl.set_fontsize(12)
+tbl.scale(1.3, 2.2)
+
+# 헤더 스타일
+for j in range(3):
+    tbl[0, j].set_facecolor("#2C3E50")
+    tbl[0, j].set_text_props(color="white", fontweight="bold")
+
+# 합계 행 스타일
+last_row = len(table_data)
+for j in range(3):
+    tbl[last_row, j].set_text_props(fontweight="bold")
+
+fig.tight_layout(pad=3.0)
 PIE_PATH = "/tmp/chart_pie.png"
-fig.savefig(PIE_PATH, dpi=180, bbox_inches="tight", facecolor="#0F1117", edgecolor="none")
-plt.close()
-print(f"  파이차트 생성 완료")
-
+fig.savefig(PIE_PATH, dpi=180, bbox_inches="tight",
+            facecolor="white", edgecolor="none")
 PIE_URL = upload_github(PIE_PATH, "chart_pie.png")
+
+plt.close()
+print("  파이차트 생성 완료")
+
 
 # ─────────────────────────────────────────────
 # 5. 관심종목 지수기반 분석 차트
