@@ -149,17 +149,29 @@ NOTION_HEADERS = {
 BASE_URL = "https://api.notion.com/v1"
 
 def get_blocks(page_id: str) -> list:
-    resp = requests.get(
-        f"{BASE_URL}/blocks/{page_id}/children?page_size=100",
-        headers=NOTION_HEADERS, timeout=20
-    )
-    return resp.json().get("results", [])
+    """페이지 블록 전체 조회 (100개 초과 시 페이지네이션)"""
+    results, cursor = [], None
+    while True:
+        url = f"{BASE_URL}/blocks/{page_id}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        resp = requests.get(url, headers=NOTION_HEADERS, timeout=20)
+        data = resp.json()
+        results.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+    return results
 
-def append_blocks(page_id: str, children: list) -> bool:
+def append_blocks(page_id: str, children: list, after: str = None) -> bool:
+    """블록 추가. after에 블록 ID를 넘기면 해당 블록 바로 뒤에 삽입."""
+    payload = {"children": children}
+    if after:
+        payload["after"] = after
     resp = requests.patch(
         f"{BASE_URL}/blocks/{page_id}/children",
         headers=NOTION_HEADERS,
-        json={"children": children},
+        json=payload,
         timeout=30,
     )
     if resp.status_code != 200:
@@ -714,24 +726,27 @@ for idx_name, filename in CHART_FILES.items():
 
 # 관심종목 DB 업데이트
 print("  관심종목 DB 업데이트 중...")
-existing_wl    = query_all(DB_관심종목)
-ticker_to_page = {}
-for row in existing_wl:
-    rt = row["properties"].get("티커", {})
-    tk = rt["rich_text"][0]["plain_text"] if rt.get("rich_text") else ""
-    if tk: ticker_to_page[tk] = row["id"]
+try:
+    existing_wl    = query_all(DB_관심종목)
+    ticker_to_page = {}
+    for row in existing_wl:
+        rt = row["properties"].get("티커", {})
+        tk = rt["rich_text"][0]["plain_text"] if rt.get("rich_text") else ""
+        if tk: ticker_to_page[tk] = row["id"]
 
-for _, r in df_result.iterrows():
-    page_id = ticker_to_page.get(r["티커"])
-    if not page_id: continue
-    notion.pages.update(page_id=page_id, properties={
-        "6개월수익률":    {"number": round(r["6개월수익률"], 4)},
-        "지수6개월수익률": {"number": round(r["지수6개월수익률"], 4)},
-        "지수대비수익률":  {"number": round(r["지수대비수익률"], 4)},
-        "판정":          {"select": {"name": r["판정"]}},
-        "최근업데이트":   {"rich_text": [{"text": {"content": NOW_STR}}]},
-    })
-    print(f"    {r['종목이름']} ({r['티커']}) → {r['판정']}")
+    for _, r in df_result.iterrows():
+        page_id = ticker_to_page.get(r["티커"])
+        if not page_id: continue
+        notion.pages.update(page_id=page_id, properties={
+            "6개월수익률":    {"number": round(r["6개월수익률"], 4)},
+            "지수6개월수익률": {"number": round(r["지수6개월수익률"], 4)},
+            "지수대비수익률":  {"number": round(r["지수대비수익률"], 4)},
+            "판정":          {"select": {"name": r["판정"]}},
+            "최근업데이트":   {"rich_text": [{"text": {"content": NOW_STR}}]},
+        })
+        print(f"    {r['종목이름']} ({r['티커']}) → {r['판정']}")
+except Exception as e:
+    print(f"  ⚠️  관심종목 DB 업데이트 실패 (Integration 공유 여부 확인 필요): {e}")
 
 # ─────────────────────────────────────────────
 # 8. AI 종목 뉴스 요약 (Claude API)
@@ -918,41 +933,46 @@ else:
     append_blocks(PAGE_PORTFOLIO, [b_callout(ts_text, "🕐")])
     print("  🕐 업데이트 시각 블록 추가")
 
-def replace_image_block(block_id: str | None, page_id: str, url: str,
-                        heading: str, heading_fn=b_h3) -> None:
-    """기존 이미지 블록을 삭제하고 새 블록을 추가. Notion 이미지 캐시 우회."""
+def update_image_block(block_id: str | None, page_id: str, url: str,
+                       heading: str, after_block_id: str = None) -> str | None:
+    """
+    이미지 블록이 있으면 URL만 교체(위치 유지), 없으면 헤딩+이미지를 삽입.
+    URL에 타임스탬프가 포함되어 있으므로 Notion이 항상 새 이미지를 fetch.
+    반환값: 이미지 블록 ID (새로 생성된 경우) 또는 None
+    """
     if block_id:
-        delete_block(block_id)
-        append_blocks(page_id, [b_image(url)])
-        print(f"  🔄 {heading} 이미지 갱신 (delete→append)")
+        ok = update_block(block_id, {"image": {"type": "external", "external": {"url": url}}})
+        print(f"  🔄 {heading} 이미지 갱신")
+        return block_id if ok else None
     else:
-        append_blocks(page_id, [heading_fn(heading), b_image(url)])
+        ok = append_blocks(page_id, [b_h3(heading), b_image(url)], after=after_block_id)
         print(f"  ➕ {heading} 섹션 추가")
+        return None
 
 # ── 파이차트 이미지 ──
 if PIE_URL:
-    replace_image_block(pie_block_id, PAGE_PORTFOLIO, PIE_URL, "📈 분류별 비율")
+    update_image_block(pie_block_id, PAGE_PORTFOLIO, PIE_URL, "📈 분류별 비율")
 
 # ── 종목별 수익률 바차트 ──
 if BAR_URL:
-    replace_image_block(bar_block_id, PAGE_PORTFOLIO, BAR_URL, "📊 종목별 수익률 현황")
+    update_image_block(bar_block_id, PAGE_PORTFOLIO, BAR_URL, "📊 종목별 수익률 현황")
 
 # ── 포트폴리오 히스토리 차트 ──
 if HISTORY_URL:
-    replace_image_block(history_block_id, PAGE_PORTFOLIO, HISTORY_URL, "📅 포트폴리오 히스토리")
+    update_image_block(history_block_id, PAGE_PORTFOLIO, HISTORY_URL, "📅 포트폴리오 히스토리")
 
 # ── 최근 매매일지 표 ──
 if recent_trades:
     if trades_section_id:
-        # 섹션 다음 블록(표)을 찾아 삭제 후 재삽입
+        # 헤딩 바로 다음 블록이 표면 삭제 후 헤딩 뒤에 재삽입
         for i, b in enumerate(all_blocks):
             if b["id"] == trades_section_id and i + 1 < len(all_blocks):
                 next_b = all_blocks[i + 1]
                 if next_b.get("type") == "table":
                     delete_block(next_b["id"])
-                    # 헤딩 다음에 표 삽입 (append to page, not ideal but works)
                 break
-        append_blocks(PAGE_PORTFOLIO, [b_recent_trades_table(recent_trades)])
+        append_blocks(PAGE_PORTFOLIO, [b_recent_trades_table(recent_trades)],
+                      after=trades_section_id)
         print("  🔄 최근 매매일지 표 갱신")
     else:
         append_blocks(PAGE_PORTFOLIO, [
@@ -977,9 +997,8 @@ if idx_section_id:
         print("  🔄 지수분석 업데이트 시각 갱신")
     for idx_name, block_id in idx_img_ids.items():
         if idx_name in GITHUB_URLS:
-            delete_block(block_id)
-            append_blocks(PAGE_PORTFOLIO, [b_image(GITHUB_URLS[idx_name])])
-            print(f"  🔄 {idx_name} 차트 이미지 갱신 (delete→append)")
+            update_block(block_id, {"image": {"type": "external", "external": {"url": GITHUB_URLS[idx_name]}}})
+            print(f"  🔄 {idx_name} 차트 이미지 갱신")
 else:
     new_blocks = [
         b_divider(),
