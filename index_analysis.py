@@ -43,9 +43,9 @@ GITHUB_FOLDER = "charts"
 
 # 노션 ID
 PAGE_PORTFOLIO = "37e2fdd1299881b58b19c4d63105e234"
-DB_총자산      = "5218a3f6665d4aae8b7ef643163b4b53"
-DB_보유주식    = "bd24ff1034d64012b31d5b88de7214f0"
-DB_매매일지    = "e15ebbff9f2743f39c431a889d3105e4"
+DB_총자산      = "b8c9d6d53be24cab88b62dfde3edd658"
+DB_보유주식    = "041399d92e4a46a8a0419208fcea51b5"
+DB_매매일지    = "569831e32ee34e78a2743a35e655a93f"
 DB_관심종목    = "1fdfe95bd1064b258719fa25e3361f77"
 
 notion   = Client(auth=NOTION_TOKEN)
