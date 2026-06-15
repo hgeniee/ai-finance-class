@@ -32,7 +32,7 @@ import matplotlib.patches as mpatches
 import matplotlib.font_manager as fm
 import matplotlib.ticker as mtick
 from notion_client import Client
-import anthropic
+from openai import OpenAI
 
 warnings.filterwarnings("ignore")
 
@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore")
 NOTION_TOKEN      = os.environ["NOTION_TOKEN"]
 GITHUB_TOKEN      = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO       = os.environ["GITHUB_REPO"]
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+SCHOOL_API_KEY = os.environ.get("SCHOOL_API_KEY", "")
 GITHUB_BRANCH     = "main"
 GITHUB_FOLDER     = "charts"
 
@@ -754,13 +754,16 @@ def fetch_stock_news(ticker_yf: str, name: str, max_items: int = 3) -> list[dict
         return []
 
 def summarize_news_claude(name: str, ticker: str, news_list: list[dict]) -> str:
-    if not ANTHROPIC_API_KEY or not news_list:
+    if not SCHOOL_API_KEY or not news_list:
         return "뉴스 없음"
     try:
-        client  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        titles  = "\n".join(f"- {n['title']}" for n in news_list)
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        client = OpenAI(
+            api_key=SCHOOL_API_KEY,
+            base_url="https://factchat-cloud.mindlogic.ai/v1/gateway",
+        )
+        titles   = "\n".join(f"- {n['title']}" for n in news_list)
+        response = client.chat.completions.create(
+            model="claude-sonnet-4-6",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -771,9 +774,9 @@ def summarize_news_claude(name: str, ticker: str, news_list: list[dict]) -> str:
                 )
             }]
         )
-        return message.content[0].text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"    [경고] Claude 요약 실패 ({name}): {e}")
+        print(f"    [경고] AI 요약 실패 ({name}): {e}")
         return "요약 실패"
 
 # 관심종목 + 보유주식에서 뉴스 수집 (중복 제거)
@@ -915,32 +918,28 @@ else:
     append_blocks(PAGE_PORTFOLIO, [b_callout(ts_text, "🕐")])
     print("  🕐 업데이트 시각 블록 추가")
 
+def replace_image_block(block_id: str | None, page_id: str, url: str,
+                        heading: str, heading_fn=b_h3) -> None:
+    """기존 이미지 블록을 삭제하고 새 블록을 추가. Notion 이미지 캐시 우회."""
+    if block_id:
+        delete_block(block_id)
+        append_blocks(page_id, [b_image(url)])
+        print(f"  🔄 {heading} 이미지 갱신 (delete→append)")
+    else:
+        append_blocks(page_id, [heading_fn(heading), b_image(url)])
+        print(f"  ➕ {heading} 섹션 추가")
+
 # ── 파이차트 이미지 ──
 if PIE_URL:
-    if pie_block_id:
-        update_block(pie_block_id, {"image": {"type": "external", "external": {"url": PIE_URL}}})
-        print("  🔄 파이차트 이미지 갱신")
-    else:
-        append_blocks(PAGE_PORTFOLIO, [b_h3("📈 분류별 비율"), b_image(PIE_URL)])
-        print("  ➕ 파이차트 섹션 추가")
+    replace_image_block(pie_block_id, PAGE_PORTFOLIO, PIE_URL, "📈 분류별 비율")
 
 # ── 종목별 수익률 바차트 ──
 if BAR_URL:
-    if bar_block_id:
-        update_block(bar_block_id, {"image": {"type": "external", "external": {"url": BAR_URL}}})
-        print("  🔄 수익률 바차트 이미지 갱신")
-    else:
-        append_blocks(PAGE_PORTFOLIO, [b_h3("📊 종목별 수익률 현황"), b_image(BAR_URL)])
-        print("  ➕ 수익률 바차트 섹션 추가")
+    replace_image_block(bar_block_id, PAGE_PORTFOLIO, BAR_URL, "📊 종목별 수익률 현황")
 
 # ── 포트폴리오 히스토리 차트 ──
 if HISTORY_URL:
-    if history_block_id:
-        update_block(history_block_id, {"image": {"type": "external", "external": {"url": HISTORY_URL}}})
-        print("  🔄 히스토리 차트 이미지 갱신")
-    else:
-        append_blocks(PAGE_PORTFOLIO, [b_h3("📅 포트폴리오 히스토리"), b_image(HISTORY_URL)])
-        print("  ➕ 히스토리 차트 섹션 추가")
+    replace_image_block(history_block_id, PAGE_PORTFOLIO, HISTORY_URL, "📅 포트폴리오 히스토리")
 
 # ── 최근 매매일지 표 ──
 if recent_trades:
@@ -978,8 +977,9 @@ if idx_section_id:
         print("  🔄 지수분석 업데이트 시각 갱신")
     for idx_name, block_id in idx_img_ids.items():
         if idx_name in GITHUB_URLS:
-            update_block(block_id, {"image": {"type": "external", "external": {"url": GITHUB_URLS[idx_name]}}})
-            print(f"  🔄 {idx_name} 차트 이미지 갱신")
+            delete_block(block_id)
+            append_blocks(PAGE_PORTFOLIO, [b_image(GITHUB_URLS[idx_name])])
+            print(f"  🔄 {idx_name} 차트 이미지 갱신 (delete→append)")
 else:
     new_blocks = [
         b_divider(),
