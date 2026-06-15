@@ -592,7 +592,8 @@ WATCHLIST = [
     ("존슨앤드존슨", "JNJ",     "S&P500",   "JNJ"),
     ("코카콜라",     "KO",      "S&P500",   "KO"),
 ]
-INDEX_TICKERS = {"코스피200": "^KS200", "S&P500": "^GSPC", "나스닥100": "^NDX"}
+INDEX_TICKERS = {"코스피200": "069500.KS", "S&P500": "^GSPC", "나스닥100": "^NDX"}
+# ^KS200은 yfinance 월봉 데이터 미제공 → KODEX 200 ETF(069500.KS)로 대체
 INDEX_COLORS  = {"코스피200": "#4A90E2", "S&P500": "#52C41A", "나스닥100": "#9B59B6"}
 STOCK_PALETTE = ["#FF6B6B","#FFD93D","#6BCB77","#4D96FF","#FF922B",
                  "#CC5DE8","#20C997","#F06595","#74C0FC","#A9E34B"]
@@ -881,15 +882,18 @@ def b_recent_trades_table(trades_list: list) -> dict:
 all_blocks = get_blocks(PAGE_PORTFOLIO)
 
 # 블록 ID 탐색
-ts_block_id       = None
-pie_block_id      = None
-bar_block_id      = None
-history_block_id  = None
-trades_section_id = None
-news_section_id   = None
-idx_section_id    = None
-idx_ts_block_id   = None
-idx_img_ids       = {}
+ts_block_id        = None
+pie_block_id       = None
+pie_heading_id     = None   # 파이차트 헤딩 → delete→append after 헤딩으로 위치 유지
+bar_block_id       = None
+bar_heading_id     = None
+history_block_id   = None
+history_heading_id = None
+trades_section_id  = None
+news_section_id    = None
+idx_section_id     = None
+idx_ts_block_id    = None
+idx_img_ids        = {}
 
 for b in all_blocks:
     btype = b.get("type", "")
@@ -901,7 +905,7 @@ for b in all_blocks:
         if "마지막 업데이트" in text and "지수" in text:
             idx_ts_block_id = b["id"]
     if btype == "image":
-        url = b["image"].get("external", {}).get("url", "")
+        url = (b["image"].get("external", {}) or b["image"].get("file", {})).get("url", "")
         if "chart_pie" in url:
             pie_block_id = b["id"]
         if "chart_bar" in url:
@@ -914,12 +918,12 @@ for b in all_blocks:
     if btype in ("heading_2", "heading_3"):
         rich = b[btype].get("rich_text", [])
         text = "".join(r.get("plain_text", "") for r in rich)
-        if "지수기반 종목분석" in text:
-            idx_section_id = b["id"]
-        if "최근 매매일지" in text:
-            trades_section_id = b["id"]
-        if "AI 종목 뉴스" in text:
-            news_section_id = b["id"]
+        if "지수기반 종목분석" in text:  idx_section_id    = b["id"]
+        if "최근 매매일지"     in text:  trades_section_id = b["id"]
+        if "AI 종목 뉴스"      in text:  news_section_id   = b["id"]
+        if "분류별 비율"       in text:  pie_heading_id    = b["id"]
+        if "종목별 수익률"     in text:  bar_heading_id    = b["id"]
+        if "포트폴리오 히스토리" in text: history_heading_id = b["id"]
 
 # ── 업데이트 시각 callout ──
 ts_text = f"🕐 마지막 업데이트: {NOW_STR} (KST)  |  GitHub Actions 자동 실행  |  USD/KRW: {USD_KRW:,.0f}"
@@ -933,33 +937,37 @@ else:
     append_blocks(PAGE_PORTFOLIO, [b_callout(ts_text, "🕐")])
     print("  🕐 업데이트 시각 블록 추가")
 
-def update_image_block(block_id: str | None, page_id: str, url: str,
-                       heading: str, after_block_id: str = None) -> str | None:
+def refresh_image_block(block_id: str | None, heading_id: str | None,
+                        page_id: str, url: str, heading: str) -> None:
     """
-    이미지 블록이 있으면 URL만 교체(위치 유지), 없으면 헤딩+이미지를 삽입.
-    URL에 타임스탬프가 포함되어 있으므로 Notion이 항상 새 이미지를 fetch.
-    반환값: 이미지 블록 ID (새로 생성된 경우) 또는 None
+    이미지 블록을 항상 delete → append(after=헤딩) 방식으로 교체.
+    - Notion이 update_block 시 query string을 저장 안 하는 문제 우회
+    - after=헤딩_id 이므로 헤딩 바로 아래에 삽입 → 위치 유지
+    - 헤딩도 없으면 헤딩+이미지를 페이지 끝에 새로 추가
     """
     if block_id:
-        ok = update_block(block_id, {"image": {"type": "external", "external": {"url": url}}})
-        print(f"  🔄 {heading} 이미지 갱신")
-        return block_id if ok else None
+        delete_block(block_id)
+
+    if heading_id:
+        append_blocks(page_id, [b_image(url)], after=heading_id)
+        action = "🔄 갱신" if block_id else "➕ 추가"
     else:
-        ok = append_blocks(page_id, [b_h3(heading), b_image(url)], after=after_block_id)
-        print(f"  ➕ {heading} 섹션 추가")
-        return None
+        # 헤딩도 없으면 헤딩+이미지 신규 삽입
+        append_blocks(page_id, [b_h3(heading), b_image(url)])
+        action = "➕ 섹션 추가"
+    print(f"  {action} {heading}")
 
 # ── 파이차트 이미지 ──
 if PIE_URL:
-    update_image_block(pie_block_id, PAGE_PORTFOLIO, PIE_URL, "📈 분류별 비율")
+    refresh_image_block(pie_block_id, pie_heading_id, PAGE_PORTFOLIO, PIE_URL, "📈 분류별 비율")
 
 # ── 종목별 수익률 바차트 ──
 if BAR_URL:
-    update_image_block(bar_block_id, PAGE_PORTFOLIO, BAR_URL, "📊 종목별 수익률 현황")
+    refresh_image_block(bar_block_id, bar_heading_id, PAGE_PORTFOLIO, BAR_URL, "📊 종목별 수익률 현황")
 
 # ── 포트폴리오 히스토리 차트 ──
 if HISTORY_URL:
-    update_image_block(history_block_id, PAGE_PORTFOLIO, HISTORY_URL, "📅 포트폴리오 히스토리")
+    refresh_image_block(history_block_id, history_heading_id, PAGE_PORTFOLIO, HISTORY_URL, "📅 포트폴리오 히스토리")
 
 # ── 최근 매매일지 표 ──
 if recent_trades:
